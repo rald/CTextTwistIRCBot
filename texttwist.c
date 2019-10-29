@@ -156,6 +156,17 @@ static void onLine(dyad_Event * e)
 			}
 		}
 
+
+		if(par[0]=='#') {
+			if (!strncmp(txt, "hello", 5)) {
+				sendf(e->stream,"PRIVMSG %s :%s\r\n",par,"hi");
+			} else if (!strncmp(txt, "hi", 5)) {
+				sendf(e->stream,"PRIVMSG %s :%s\r\n",par,"hello");
+			}
+		}
+
+
+
 	} else if (!strcmp(cmd, "JOIN")) {
 		printf("%s joined %s\n", usr, strlen(par) ? par : txt);
 	} else if (!strcmp(cmd, "PART")) {
