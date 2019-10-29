@@ -13,8 +13,10 @@ char *chn = "#gametime";
 char *nck = "siesto";
 char *pss = NULL;
 char *mst = "siesta";
+char *mps = "143445254";
 
 int isReg = 0;
+int isAuth = 0;
 
 int ticks = 0;
 
@@ -70,11 +72,12 @@ static char *skip(char *s, char c)
 	return s;
 }
 
-static void sendf(dyad_Stream *s,char *fmt,...) {
+static void sendf(dyad_Stream * s, char *fmt, ...)
+{
 	va_list args;
-	va_start(args,fmt);
-	vprintf(fmt,args);
-	dyad_vwritef(s,fmt,args);
+	va_start(args, fmt);
+	vprintf(fmt, args);
+	dyad_vwritef(s, fmt, args);
 	va_end(args);
 }
 
@@ -96,7 +99,7 @@ static void onLine(dyad_Event * e)
 {
 	char *tmp, *cmd, *usr, *par, *txt;
 
-	printf("%s\n",e->data);
+	printf("%s\n", e->data);
 
 	tmp = strdup(e->data);
 
@@ -108,7 +111,7 @@ static void onLine(dyad_Event * e)
 		return;
 	}
 
-	if(!*cmd) {
+	if (!*cmd) {
 		free(cmd);
 		return;
 	}
@@ -146,26 +149,50 @@ static void onLine(dyad_Event * e)
 		printf("<%s> %s\n", usr, txt);
 
 		if (!strcmp(usr, mst)) {
-			if (!strncmp(txt, PFX "quit", 5)) {
-				if (strlen(txt) > 6) {
-					sendf(e->stream, "QUIT :%s\r\n",
-						    txt + 6);
-				} else {
-					sendf(e->stream, "QUIT\r\n");
+
+			if (!strcmp(par, nck)) {
+
+				if (!strncmp(txt, PFX "auth", 5)) {
+					if (strlen(txt) > 6
+					    && !strcmp(txt + 6, mps)) {
+						isAuth = 1;
+						sendf(e->stream,
+						      "PRIVMSG %s :%s\r\n", usr,
+						      "access granted");
+					} else {
+						isAuth = 0;
+						sendf(e->stream,
+						      "PRIVMSG %s :%s\r\n", usr,
+						      "access denied");
+					}
 				}
+
 			}
+
+			if (isAuth) {
+
+				if (!strncmp(txt, PFX "quit", 5)) {
+					if (strlen(txt) > 6) {
+						sendf(e->stream, "QUIT :%s\r\n",
+						      txt + 6);
+					} else {
+						sendf(e->stream, "QUIT\r\n");
+					}
+				}
+
+			}
+
 		}
 
-
-		if(par[0]=='#') {
+		if (par[0] == '#') {
 			if (!strncmp(txt, "hello", 5)) {
-				sendf(e->stream,"PRIVMSG %s :%s\r\n",par,"hi");
+				sendf(e->stream, "PRIVMSG %s :%s\r\n", par,
+				      "hi");
 			} else if (!strncmp(txt, "hi", 5)) {
-				sendf(e->stream,"PRIVMSG %s :%s\r\n",par,"hello");
+				sendf(e->stream, "PRIVMSG %s :%s\r\n", par,
+				      "hello");
 			}
 		}
-
-
 
 	} else if (!strcmp(cmd, "JOIN")) {
 		printf("%s joined %s\n", usr, strlen(par) ? par : txt);
