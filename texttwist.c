@@ -1,58 +1,144 @@
+#define _GNU_SOURCE
+
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
+#include <stdarg.h>
+#include <stddef.h>
 #include <string.h>
-#include <time.h>
 #include <ctype.h>
+#include <time.h>
 
 #include "dyad.h"
 
+#define TEXTTWIST_IMPLEMENTATION
+#include "texttwist.h"
+
 #define GAME_TITLE "TEXTTWIST"
-
-#define RANDOM_WORDS_FILE "rand.txt"
-
 #define PFX "."
+#define SCORE_FILE "score.txt"
 
-int prt = 6667;
-char *srv = "irc.undernet.org";
-char *chn = "#gametime";
-char *nck = "siesto";
-char *pss = NULL;
-char *mst = "siesta";
-char *mps = "143445254";
+static char *srv = "sakura.jp.as.dal.net";
+static int prt = 6667;
+static char *chn = "#pantasya";
+static char *nck = "sieste";
+static char *pss = NULL;
+
+static size_t allotedtime=180;
+
+static char *cmd=NULL, *usr=NULL, *par=NULL, *txt=NULL;
+
+static int isReg=0;
+
 typedef enum GameState GameState;
 
 enum GameState {
 	GAME_STATE_INIT=0,
-	GAME_STATE_WAIT,
 	GAME_STATE_START,
-	GAME_STATE_PLAY,
-	GAME_STATE_END,
 	GAME_STATE_MAX
 };
 
-char *cmd=NULL, *usr=NULL, *par=NULL, *txt=NULL;
+static GameState gamestate=GAME_STATE_INIT;
 
-int isReg = 0;
-int isAuth = 0;
+typedef struct Player Player;
 
-int ticks = 0;
+struct Player {
+	char *nick;
+	int score;
+};
 
-GameState gameState=GAME_STATE_INIT;
-char **anagrams=NULL;
-int numAnagrams=0;
-char *bonusWord=NULL;
-int longWordLen=0;
-int *guessed=NULL;
-int numGuessed=0;
-char *word=NULL;
-int waitingTime=0;
+static Player **players=NULL;
+static size_t nplayers=0;
 
-double drand() {
-	return rand()/(RAND_MAX+1.0);
+static char **words=NULL;
+static size_t nwords=0;
+
+static char **rands=NULL;
+static size_t nrands=0;
+
+static char **anagrams=NULL;
+static size_t nanagrams=0;
+
+static char *word=NULL;
+static char *shufword=NULL;
+
+static int *guessed=NULL;
+static size_t numguessed=0;
+
+static char *bonusWord=NULL;
+static size_t longWordLen=0;
+
+static size_t ticks=0;
+
+
+
+static void sendf(dyad_Stream * s, char *fmt, ...);
+static char *trim(char *str);
+static char *skip(char *s, char c);
+static char *append(char **a,const char *fmt, ...);
+
+static Player *CreatePlayer(char *nick,int score);
+static void DestroyPlayer(Player **player);
+static void DestroyPlayers(Player ***players,size_t *nplayers);
+static void AddPlayer(Player ***players,size_t *nplayers,char *nick,int score);
+static ssize_t FindPlayer(Player **players,size_t nplayers,char *nick);
+
+static int loadscores(char *path,Player ***players,size_t *nplayers);
+static int savescores(char *path,Player **players,size_t nplayers);
+
+static char *getlist(int *guessed,char **anagrams,size_t numAnagrams,int show);
+
+static int cmpbyscoredesc(const void *a,const void *b);
+static int cmpbylengthdesc(const void *a,const void *b);
+
+static void onConnect(dyad_Event *e);
+static void onError(dyad_Event *e);
+static void onTick(dyad_Event *e);
+static void onLine(dyad_Event *e);
+
+
+
+int main(void) {
+
+	dyad_Stream *stm;
+
+	srand((unsigned int)time(NULL));
+
+	dyad_init();
+
+	stm = dyad_newStream();
+
+	dyad_addListener(stm, DYAD_EVENT_CONNECT, onConnect, NULL);
+	dyad_addListener(stm, DYAD_EVENT_ERROR, onError, NULL);
+	dyad_addListener(stm, DYAD_EVENT_LINE, onLine, NULL);
+	dyad_addListener(stm, DYAD_EVENT_TICK, onTick, NULL);
+
+	printf("connecting...\n");
+
+	(void)dyad_connect(stm, srv, prt);
+
+	while (dyad_getStreamCount() > 0) {
+		dyad_update();
+	}
+
+	dyad_shutdown();
+
+	return 0;
 }
 
-char *trim(char *str)
-{
+static void sendf(dyad_Stream * s, char *fmt, ...) {
+	va_list args;
+
+	va_start(args, fmt);
+	(void)vprintf(fmt, args);
+	va_end(args);
+
+	va_start(args, fmt);
+	dyad_vwritef(s, fmt, args);
+	va_end(args);
+}
+
+static char *trim(char *str) {
 	size_t len = 0;
 	char *frontp = str;
 	char *endp = NULL;
@@ -85,7 +171,7 @@ char *trim(char *str)
 
 	endp = str;
 	if (frontp != str) {
-		while (*frontp) {
+		while (*frontp!='\0') {
 			*endp++ = *frontp++;
 		}
 		*endp = '\0';
@@ -94,8 +180,7 @@ char *trim(char *str)
 	return str;
 }
 
-static char *skip(char *s, char c)
-{
+static char *skip(char *s, char c) {
 	while (*s != c && *s != '\0')
 		s++;
 	if (*s != '\0')
@@ -103,167 +188,195 @@ static char *skip(char *s, char c)
 	return s;
 }
 
-static void sendf(dyad_Stream * s, char *fmt, ...)
-{
-	va_list args;
-	va_start(args, fmt);
-	vprintf(fmt, args);
-	dyad_vwritef(s, fmt, args);
-	va_end(args);
-}
-
-char *strlwr(char *s) {
-	int i;
-	for(i=0;i<strlen(s);i++) {
-		s[i]=tolower(s[i]);
-	}
-	return s;
-}
-
-char *randline(char *fn) {
-	FILE *fin=NULL;
-
-	char *buf=NULL;
-	size_t len=0;
-	ssize_t num=0;
-
-	char *line=NULL;
-	size_t linenum=0;
-
-	fin=fopen(fn,"r");
-
-	if(!fin) {
-		printf("randline: error opening file %s\n",fn);
-	}
-
-	while((num=getline(&buf,&len,fin))!=-1) {
-		char *p=strchr(buf,'\0');  if(p) *p='\0';
-		if(drand()<(1.0/++linenum)) {
-			if(line) {
-				free(line);
-				line=NULL;
-			}
-			line=malloc(sizeof(*line)*(num+1));
-			strcpy(line,buf);
-		}
-		free(buf);
-		buf=NULL;
-	}
-
-	fclose(fin);
-
-	return line;
-
-}
-
-int tokenize(char *str,char ***toks,char *dels) {
-	int n=0;
-	char *tok=NULL;
-	tok=strtok(str,dels);
-	while(tok) {
-		(*toks)=realloc((*toks),sizeof(**toks)*(n+1));
-		(*toks)[n++]=strdup(tok);
-		tok=strtok(NULL,dels);
-	}
-	return n;
-}
-
-void shuffleAnagrams(char ***anagrams,int numAnagrams) {
-	int i,j;
-	char *tmp;
-	for(i=numAnagrams-1;i>0;i--) {
-		j=rand()%(i+1);
-		tmp=(*anagrams)[i];
-		(*anagrams)[i]=(*anagrams)[j];
-		(*anagrams)[j]=tmp;
-	}
-}
-
-void shuffleWord(char **word) {
-	int i,j,k;
-	for(i=strlen(*word)-1;i>0;i--) {
-		j=rand()%(i+1);
-		k=(*word)[i];
-		(*word)[i]=(*word)[j];
-		(*word)[j]=k;
-	}
-}
-
-int cmplen(const void *a,const void *b) {
-	int l=strlen(*(char**)a);
-	int r=strlen(*(char**)b);
-	return l-r;
-}
-
-char *append(char **a,char *fmt,...) {
+static char *append(char **a,const char *fmt,...) {
 
 	char *b=NULL;
 	ssize_t lenb=0;
 
 	va_list args;
+
 	va_start(args,fmt);
 	lenb=vsnprintf(NULL,0,fmt,args);
-	b=malloc(sizeof(*b)*(lenb+1));
-	vsprintf(b,fmt,args);
+	va_end(args);
+
+	va_start(args,fmt);
+	b=calloc(lenb+1,sizeof(*b));
+	(void)vsnprintf(b,lenb+1,fmt,args);
 	va_end(args);
 
 	if(*a) {
 		(*a)=realloc(*a,sizeof(**a)*(strlen(*a)+lenb+1));
 	} else {
-		(*a)=realloc(*a,sizeof(**a)*(lenb+1));
-		(*a)[0]='\0';
+		(*a)=calloc(lenb+1,sizeof(**a));
 	}
+
 	strcat(*a,b);
+
+	free(b);
+
 	return *a;
 }
 
-char *getList(int *guessed,char **anagrams,int numAnagrams) {
-	int i,j;
+static Player *CreatePlayer(char *nick,int score) {
+	Player *player=malloc(sizeof(*player));
+	if(player) {
+		player->nick=strdup(nick);
+		player->score=score;
+	}
+	return player;
+}
+
+static void DestroyPlayer(Player **player) {
+	free((*player)->nick);
+	(*player)->nick=NULL;
+	(*player)->score=0;
+	free(*player);
+	player=NULL;
+}
+
+static void DestroyPlayers(Player ***players,size_t *nplayers) {
+	size_t i;
+	for(i=0; i<(*nplayers); i++) {
+		DestroyPlayer(&((*players)[i]));
+	}
+	free(*players);
+	(*players)=NULL;
+	(*nplayers)=0;
+}
+
+static void AddPlayer(Player ***players,size_t *nplayers,char *nick,int score) {
+	(*players)=realloc(*players,sizeof(*players)*((*nplayers)+1));
+	(*players)[(*nplayers)++]=CreatePlayer(nick,score);
+}
+
+static ssize_t FindPlayer(Player **players,size_t nplayers,char *nick) {
+	size_t i;
+	ssize_t j=-1;
+	for(i=0; i<nplayers; i++) {
+		if(!strcasecmp(nick,players[i]->nick)) {
+			j=(ssize_t)i;
+			break;
+		}
+	}
+	return j;
+}
+
+
+
+static int loadscores(char *path,Player ***players,size_t *nplayers) {
+	FILE *fh;
+	char nick[32];
+	int score=0;
+
+	if((fh=fopen(path,"rt"))==NULL) {
+		printf("Error: cannot open %s.\n",path);
+		return 1;
+	}
+
+	if((*players)!=NULL) {
+		DestroyPlayers(players,nplayers);
+	}
+
+	while(fscanf(fh,"%s %d\n",nick,&score)==2) {
+		AddPlayer(players,nplayers,nick,score);
+	}
+
+	(void)fclose(fh);
+
+	return 0;
+}
+
+static int savescores(char *path,Player **players,size_t nplayers) {
+	FILE *fh;
+	size_t i;
+
+	if((fh=fopen(path,"wt"))==NULL) {
+		printf("Error: cannot open %s.\n",path);
+		return 1;
+	}
+
+	for(i=0; i<nplayers; i++) {
+		fprintf(fh,"%s %d\n",players[i]->nick,players[i]->score);
+	}
+
+	(void)fclose(fh);
+
+	return 0;
+}
+
+static char *getlist(int *guessed,char **anagrams,size_t numAnagrams,int show) {
+	size_t i,j;
 	char *list=NULL;
-	for(i=0;i<numAnagrams;i++) {
-		if(i!=0) append(&list,", ");
-		if(guessed[i]) {
-			append(&list,anagrams[i]);
+	for(i=0; i<numAnagrams; i++) {
+		if(i!=0) { (void)append(&list,", "); }
+		if(show || guessed[i]) {
+			if(guessed[i]) {
+				(void)append(&list,"%s+",anagrams[i]);
+			} else {
+				(void)append(&list,"%s-",anagrams[i]);
+			}
 		} else {
-			for(j=0;j<strlen(anagrams[i]);j++) {
-				append(&list,"*");
+			for(j=0; j<strlen(anagrams[i]); j++) {
+				(void)append(&list,"*");
 			}
 		}
-		if(!strcmp(anagrams[i],bonusWord)) {
-			append(&list,"?");
+		if(!strcasecmp(anagrams[i],bonusWord)) {
+			(void)append(&list,"?");
 		}
 	}
 	return list;
 }
 
-
-void list(dyad_Stream *s,char *src,char *dst,int *guessed,char **anagrams,int numAnagrams) {
-	char *list=NULL;
-	list=getList(guessed,anagrams,numAnagrams);
-	sendf(s,"PRIVMSG %s :" GAME_TITLE " %s: %s\r\n",dst,src,list);
-	free(list);
-	list=NULL;
+static int cmpbyscoredesc(const void *a,const void *b) {
+	Player *l=*(Player**)a;
+	Player *r=*(Player**)b;
+	if(l->score<r->score) return 1;
+	else if(l->score>r->score) return -1;
+	return 0;
 }
 
+static int cmpbylengthdesc(const void *a,const void *b) {
+	size_t l=strlen(*(char**)a);
+	size_t r=strlen(*(char**)b);
+	if(l<r) return 1;
+	else if(l>r) return -1;
+	return rand()%3-1;
+}
 
-static void onConnect(dyad_Event * e)
-{
+static void onConnect(dyad_Event *e) {
 	if (pss) {
 		dyad_writef(e->stream, "PASS %s\r\n", pss);
 	}
 	dyad_writef(e->stream, "NICK %s\r\n", nck);
-	dyad_writef(e->stream, "USER %s %s %s :%s\r\n", nck, nck, nck, nck);
+	dyad_writef(e->stream, "USER %s %s bla :%s\r\n", nck, nck, nck);
 }
 
-static void onError(dyad_Event * e)
-{
+static void onError(dyad_Event *e) {
 	printf("error: %s\n", e->msg);
 }
 
-static void onLine(dyad_Event * e)
-{
+static void onTick(dyad_Event *e) {
+	ticks++;
+	if(gamestate==GAME_STATE_START) {
+		if(ticks>=allotedtime) {
 
-	int i,j;
+			sendf(e->stream,"PRIVMSG %s :" GAME_TITLE " Time Up\r\n",chn);
+
+			char *list=NULL;
+			list=getlist(guessed,anagrams,nanagrams,1);
+			sendf(e->stream,"PRIVMSG %s :" GAME_TITLE " %s\r\n",chn,list);
+			free(list);
+			list=NULL;
+
+			sendf(e->stream,"PRIVMSG %s :" GAME_TITLE " Game Over\r\n",chn);
+			gamestate=GAME_STATE_INIT;
+		}
+	}
+}
+
+static void onLine(dyad_Event *e) {
+
+	size_t i;
 
 	char *tmp=NULL;
 
@@ -275,11 +388,11 @@ static void onLine(dyad_Event * e)
 
 	usr = srv;
 
-	if (!cmd) {
+	if (cmd==NULL) {
 		return;
 	}
 
-	if (!*cmd) {
+	if (*cmd=='\0') {
 		free(cmd);
 		return;
 	}
@@ -289,157 +402,148 @@ static void onLine(dyad_Event * e)
 		cmd = skip(usr, ' ');
 		if (cmd[0] == '\0')
 			return;
-		skip(usr, '!');
+		(void)skip(usr, '!');
 	}
-	skip(cmd, '\r');
+	(void)skip(cmd, '\r');
 	par = skip(cmd, ' ');
 	txt = skip(par, ':');
-	trim(par);
 
-	trim(txt);
+	(void)trim(par);
 
-/*
-	printf("usr: %s\n",usr);
-	printf("cmd: %s\n",cmd);
-	printf("par: %s\n",par);
-	printf("txt: %s\n",txt);
-	printf("\n");
-//*/
+	(void)trim(txt);
 
-	if (!strcmp(cmd, "PING")) {
+	if (strcmp(cmd, "PING")==0) {
 		sendf(e->stream, "PONG :%s\r\n", txt);
-	} else if (!strcmp(cmd, "001")) {
+	} else if (strcmp(cmd, "001")==0) {
 		printf("connected.\n");
-		sendf(e->stream, "JOIN :%s\r\n", chn);
+		sendf(e->stream, "JOIN %s\r\n", chn);
 		isReg = 1;
-	} else if (!strcmp(cmd, "PRIVMSG")) {
 
+		loadscores(SCORE_FILE,&players,&nplayers);
+
+		loadwords("wordlist.txt",&words,&nwords,3,8);
+		loadwords("randlist.txt",&rands,&nrands,6,8);
+
+	} else if (strcmp(cmd, "PRIVMSG")==0) {
 		printf("<%s> %s\n", usr, txt);
 
-		if (!strcmp(usr, mst)) {
+		if(strcasecmp(txt,PFX "start")==0) {
+			if(gamestate==GAME_STATE_INIT) {
+				word=rands[rand()%nrands];
 
-			if (!strcmp(par, nck)) {
+				if(shufword!=NULL) free(shufword);
 
-				if (!strncmp(txt, PFX "auth", 5)) {
-					if (strlen(txt) > 6
-					    && !strcmp(txt + 6, mps)) {
-						isAuth = 1;
-						sendf(e->stream,
-						      "PRIVMSG %s :%s\r\n", usr,
-						      "access granted");
-					} else {
-						isAuth = 0;
-						sendf(e->stream,
-						      "PRIVMSG %s :%s\r\n", usr,
-						      "access denied");
+				shufword=strdup(word);
+				shuffleword(shufword);
+
+				if(anagrams!=NULL) {
+					for(i=0;i<nanagrams;i++) {
+						free(anagrams[i]);
+						anagrams[i]=NULL;
 					}
+					free(anagrams);
+					anagrams=NULL;
+					nanagrams=0;
 				}
+
+				getanagrams(&anagrams,&nanagrams,words,nwords,word);
+
+				qsort(anagrams,nanagrams,sizeof(*anagrams),cmpbylengthdesc);
+
+
+				if(guessed!=NULL) {
+					free(guessed);
+					guessed=NULL;
+				}
+
+				guessed=malloc(sizeof(*guessed)*nanagrams);
+				for(i=0;i<nanagrams;i++) {
+					guessed[i]=0;
+				}
+				numguessed=0;
+
+				bonusWord=anagrams[rand()%nanagrams];
+
+				longWordLen=strlen(word);
+
+				sendf(e->stream,"PRIVMSG %s :" GAME_TITLE " %s\r\n",chn,shufword);
+
+				ticks=0;
+
+				gamestate=GAME_STATE_START;
 
 			}
-
-			if (isAuth) {
-
-				if (!strncmp(txt, PFX "quit", 5)) {
-					if (strlen(txt) > 6) {
-						sendf(e->stream, "QUIT :%s\r\n", txt + 6);
-					} else {
-						sendf(e->stream, "QUIT\r\n");
-					}
-				}
-
+		} else if(strcasecmp(txt,PFX "text")==0) {
+			if(gamestate==GAME_STATE_START) {
+				sendf(e->stream,"PRIVMSG %s :" GAME_TITLE " %s\r\n",chn,shufword);
 			}
-
-		}
-
-		if (par[0] == '#') {
-
-			if (!strcmp(txt, PFX "start")) {
-
-				if(gameState==GAME_STATE_INIT) {
-
-					char *line=randline(RANDOM_WORDS_FILE);
-
-					strlwr(line);
-
-					numAnagrams=tokenize(line,&anagrams,",");
-
-					word=strdup(anagrams[0]);
-
-					shuffleWord(&word);
-
-					bonusWord=anagrams[rand()%numAnagrams];
-
-					if(numAnagrams>0) {
-						longWordLen=strlen(anagrams[0]);
-						for(i=1;i<numAnagrams;i++) {
-							if(longWordLen<strlen(anagrams[i])) {
-								longWordLen=strlen(anagrams[i]);
-							}
-						}
-					}
-
-					guessed=malloc(sizeof(*guessed)*numAnagrams);
-					for(i=0;i<numAnagrams;i++) {
-						guessed[i]=0;
-					}
-
-					shuffleAnagrams(&anagrams,numAnagrams);
-					qsort(anagrams,numAnagrams,sizeof(*anagrams),cmplen);
-
-					free(line);
-					line=NULL;
-
-					sendf(e->stream,"PRIVMSG %s :" GAME_TITLE " %s: %s\r\n",par,usr,"Game is starting in 10 seconds...");
-
-					waitingTime=ticks+10;
-
-					gameState=GAME_STATE_WAIT;
-				}
-
-			} else if (!strcmp(txt, PFX "text")) {
-				if(gameState==GAME_STATE_START) {
-					sendf(e->stream,"PRIVMSG %s :" GAME_TITLE " %s: %s\r\n",par,usr,word);
-				} else {
-					sendf(e->stream,"PRIVMSG %s :" GAME_TITLE " %s: %s\r\n",par,usr,"Game not started");
-				}
-			} else if (!strcmp(txt, PFX "twist")) {
-				if(gameState==GAME_STATE_START) {
-					shuffleWord(&word);
-					sendf(e->stream,"PRIVMSG %s :" GAME_TITLE " %s: %s\r\n",par,usr,word);
-				} else {
-					sendf(e->stream,"PRIVMSG %s :" GAME_TITLE " %s: %s\r\n",par,usr,"Game not started");
-				}
-			} else if (!strcmp(txt, PFX "list")) {
-				if(gameState==GAME_STATE_START) {
-					list(e->stream,usr,par,guessed,anagrams,numAnagrams);
-				} else {
-					sendf(e->stream,"PRIVMSG %s :" GAME_TITLE " %s: %s\r\n",par,usr,"Game not started");
-				}
+		} else if(strcasecmp(txt,PFX "twist")==0) {
+			if(gamestate==GAME_STATE_START) {
+				shuffleword(shufword);
+				sendf(e->stream,"PRIVMSG %s :" GAME_TITLE " %s\r\n",chn,shufword);
+			}
+		} else if(strcasecmp(txt,PFX "list")==0) {
+			if(gamestate==GAME_STATE_START) {
+				char *list=NULL;
+				list=getlist(guessed,anagrams,nanagrams,0);
+				sendf(e->stream,"PRIVMSG %s :" GAME_TITLE " %s: %s\r\n",chn,usr,list);
+				free(list);
+				list=NULL;
+			}
+		} else if(strncasecmp(txt,PFX "score",6)==0) {
+			ssize_t k;
+			if(strlen(txt)>7) {
+				k=FindPlayer(players,nplayers,txt+7);
+				if(k!=-1) sendf(e->stream,"PRIVMSG %s :" GAME_TITLE " %s: %s score is %d.\r\n",chn,usr,players[k]->nick,players[k]->score);
 			} else {
-				if(gameState==GAME_STATE_START) {
+				k=FindPlayer(players,nplayers,usr);
+				if(k!=-1) sendf(e->stream,"PRIVMSG %s :" GAME_TITLE " %s: your score is %d.\r\n",chn,usr,players[k]->score);
+			}
+		} else if(strcasecmp(txt,PFX "top")==0) {
+			char *msg=NULL;
+			qsort(players,nplayers,sizeof(*players),cmpbyscoredesc);
+			for(i=0; i<(nplayers<10?nplayers:10); i++) {
+				if(i!=0) { (void)append(&msg,", "); }
+				(void)append(&msg,"%d. %s %d",i+1,players[i]->nick,players[i]->score);
+			}
+			if(msg) {
+				sendf(e->stream,"PRIVMSG %s :" GAME_TITLE " TOP: %s\r\n",chn,msg);
+				free(msg);
+				msg=NULL;
+			}
+		} else {
 
-					char *msg=NULL;
-					char *bonus=NULL;
+			if(gamestate==GAME_STATE_START) {
 
-					int points=0;
+				size_t i;
+				ssize_t j;
 
-				  j=-1;
-					for(i=0;i<numAnagrams;i++) {
-						if(!strcmp(txt,anagrams[i])) {
-							j=i;
-							break;
-						}
+				char *msg=NULL;
+				char *bonus=NULL;
+
+				int points=0;
+
+				j=-1;
+				for(i=0; i<nanagrams; i++) {
+					if(!strcasecmp(txt,anagrams[i])) {
+						j=(ssize_t)i;
+						break;
 					}
+				}
 
-					if(j!=-1) {
+				if(j!=-1) {
 
-						numGuessed++;
+					if(guessed[j]) {
+						sendf(e->stream,"PRIVMSG %s :" GAME_TITLE " %s: '%s' already guessed.\r\n",chn,usr,anagrams[j]);
+					} else {
 
-						guessed[i]=1;
+						numguessed++;
+
+						guessed[j]=1;
 
 						points+=strlen(anagrams[j]);
 
-						if(!strcmp(bonusWord,anagrams[j])) {
+						if(!strcasecmp(bonusWord,anagrams[j])) {
 							points+=100;
 							append(&bonus," secret word bonus! ");
 						}
@@ -449,38 +553,56 @@ static void onLine(dyad_Event * e)
 							append(&bonus," long word bonus! ");
 						}
 
-						if(numGuessed==numAnagrams) {
+						if(numguessed==nanagrams) {
 							points+=100;
 							append(&bonus," finishing game bonus! ");
 						}
 
 						append(&msg,"%s guessed '%s' plus %d points. %s",usr,anagrams[j],points,bonus && strlen(bonus) ? bonus : "");
 
-						sendf(e->stream,"PRIVMSG %s :" GAME_TITLE " %s: %s\r\n",par,usr,msg);
+						sendf(e->stream,"PRIVMSG %s :" GAME_TITLE " %s\r\n",chn,msg);
 
-					}
+						if(points>0) {
+							ssize_t k=FindPlayer(players,nplayers,usr);
+							if(k!=-1) {
+								players[k]->score+=points;
+							} else {
+								AddPlayer(&players,&nplayers,usr,points);
+							}
+							(void)savescores(SCORE_FILE,players,nplayers);
+						}
 
-					if(bonus) {
-						free(bonus);
-						bonus=NULL;
-					}
+						if(numguessed==nanagrams) {
 
-					if(msg) {
-						free(msg);
-						msg=NULL;
+							sendf(e->stream,"PRIVMSG %s :" GAME_TITLE " Game Finished\r\n",chn);
+
+
+							char *list=NULL;
+							list=getlist(guessed,anagrams,nanagrams,1);
+							sendf(e->stream,"PRIVMSG %s :" GAME_TITLE " %s\r\n",chn,list);
+							free(list);
+							list=NULL;
+
+							sendf(e->stream,"PRIVMSG %s :" GAME_TITLE " Game Over\r\n",chn);
+
+							gamestate=GAME_STATE_INIT;
+						}
+
 					}
 
 				}
+
+				if(bonus) {
+					free(bonus);
+					bonus=NULL;
+				}
+
+				if(msg) {
+					free(msg);
+					msg=NULL;
+				}
 			}
-
 		}
-
-	} else if (!strcmp(cmd, "JOIN")) {
-		printf("%s joined %s\n", usr, strlen(par) ? par : txt);
-	} else if (!strcmp(cmd, "PART")) {
-		printf("%s parted %s\n", usr, strlen(par) ? par : txt);
-	} else if (!strcmp(cmd, "QUIT")) {
-		printf("%s exits '%s'\n", usr, txt);
 	}
 
 	free(tmp);
@@ -488,43 +610,5 @@ static void onLine(dyad_Event * e)
 
 }
 
-static void onTick(dyad_Event * e)
-{
-	ticks++;
-	if(gameState==GAME_STATE_WAIT) {
-		if(ticks>=waitingTime) {
-			sendf(e->stream,"PRIVMSG %s :" GAME_TITLE " %s\r\n",par,word);
-			gameState=GAME_STATE_START;
-		}
-	}
-}
-
-int main(int argc, char **argv)
-{
-
-	dyad_Stream *s;
 
 
-	srand(time(NULL));
-
-	dyad_init();
-
-	s = dyad_newStream();
-
-	dyad_addListener(s, DYAD_EVENT_CONNECT, onConnect, NULL);
-	dyad_addListener(s, DYAD_EVENT_ERROR, onError, NULL);
-	dyad_addListener(s, DYAD_EVENT_LINE, onLine, NULL);
-	dyad_addListener(s, DYAD_EVENT_TICK, onTick, NULL);
-
-	printf("connecting...\n");
-
-	dyad_connect(s, srv, prt);
-
-	while (dyad_getStreamCount() > 0) {
-		dyad_update();
-	}
-
-	dyad_shutdown();
-
-	return 0;
-}
