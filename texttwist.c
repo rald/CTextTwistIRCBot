@@ -429,9 +429,12 @@ static void onLine(dyad_Event *e) {
 
 		if(strcasecmp(txt,PFX "start")==0) {
 			if(gamestate==GAME_STATE_INIT) {
-				word=rands[rand()%nrands];
 
-				if(shufword!=NULL) free(shufword);
+				if(word!=NULL) { free(word); word=NULL; }
+
+				word=strdup(rands[rand()%nrands]);
+
+				if(shufword!=NULL) { free(shufword); shufword=NULL; }
 
 				shufword=strdup(word);
 				shuffleword(shufword);
@@ -449,8 +452,6 @@ static void onLine(dyad_Event *e) {
 				getanagrams(&anagrams,&nanagrams,words,nwords,word);
 
 				qsort(anagrams,nanagrams,sizeof(*anagrams),cmpbylengthdesc);
-
-
 				if(guessed!=NULL) {
 					free(guessed);
 					guessed=NULL;
